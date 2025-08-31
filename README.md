@@ -106,32 +106,6 @@ chmod +x k3s-ha-install.sh
 # Install single master node
 ./k3s-ha-install.sh --master
 
-# Add worker nodes
-./k3s-ha-install.sh --worker --token $(sudo cat /tmp/k3s-node-token) --master-ip MASTER_IP
-```
-
-#### Scenario 2: High Availability (Production)
-
-```bash
-# Step 1: Install first master node
-./k3s-ha-install.sh --master --metallb-range "10.0.1.100-10.0.1.110"
-
-# Step 2: Install second master node
-./k3s-ha-install.sh --master-ha \
-    --token $(sudo cat /tmp/k3s-node-token) \
-    --secret CLUSTER_SECRET \
-    --master-ip FIRST_MASTER_IP
-
-# Step 3: Install third master node
-./k3s-ha-install.sh --master-ha \
-    --token $(sudo cat /tmp/k3s-node-token) \
-    --secret CLUSTER_SECRET \
-    --master-ip FIRST_MASTER_IP
-
-# Step 4: Add worker nodes
-./k3s-ha-install.sh --worker \
-    --token $(sudo cat /tmp/k3s-node-token) \
-    --master-ip FIRST_MASTER_IP
 ```
 
 #### Scenario 3: Corporate Environment with Proxy
@@ -142,14 +116,6 @@ chmod +x k3s-ha-install.sh
     --http-proxy "http://proxy.company.com:8080" \
     --https-proxy "http://proxy.company.com:8080" \
     --metallb-range "172.16.10.100-172.16.10.110"
-
-# Add HA masters with proxy
-./k3s-ha-install.sh --master-ha \
-    --token TOKEN \
-    --secret SECRET \
-    --master-ip MASTER_IP \
-    --http-proxy "http://proxy.company.com:8080" \
-    --https-proxy "http://proxy.company.com:8080"
 ```
 
 ## 🔧 Script Parameters Reference
@@ -159,7 +125,6 @@ chmod +x k3s-ha-install.sh
 | Parameter | Description | Required For | Example |
 |-----------|-------------|--------------|---------|
 | `--master` | Install as first master | First master only | `--master` |
-| `--master-ha` | Install as additional master | HA masters only | `--master-ha` |
 | `--worker` | Install as worker node | Worker nodes only | `--worker` |
 | `--token` | K3s join token | Workers, HA masters | `--token abc123...` |
 | `--secret` | Cluster secret | HA masters only | `--secret def456...` |
@@ -192,204 +157,8 @@ k3s kubectl get pods -n metallb-system
 k3s kubectl get endpoints kube-scheduler -n kube-system -o yaml
 ```
 
-### Expected Output Examples
 
-```bash
-# Healthy 3-master cluster
-$ k3s kubectl get nodes
-NAME       STATUS   ROLES                       AGE   VERSION
-master-1   Ready    control-plane,etcd,master   10m   v1.28.2+k3s1
-master-2   Ready    control-plane,etcd,master   8m    v1.28.2+k3s1
-master-3   Ready    control-plane,etcd,master   6m    v1.28.2+k3s1
-worker-1   Ready    <none>                      4m    v1.28.2+k3s1
-worker-2   Ready    <none>                      2m    v1.28.2+k3s1
-```
 
-### Testing MetalLB
 
-```bash
-# Create test service
-kubectl create deployment nginx --image=nginx
-kubectl expose deployment nginx --type=LoadBalancer --port=80
 
-# Check external IP assignment
-kubectl get services
-```
-
-## 🔒 Security Considerations
-
-### Default Security Features
-
-- **Traefik Ingress Disabled**: Custom ingress controller can be installed
-- **ServiceLB Disabled**: MetalLB provides better load balancing
-- **Network Policies**: Supported via CNI (Flannel)
-- **RBAC**: Enabled by default
-- **TLS**: All cluster communication encrypted
-
-### Additional Security Hardening
-
-```bash
-# Enable audit logging
-echo "audit-policy-file: /etc/rancher/k3s/audit.yaml" >> /etc/rancher/k3s/config.yaml
-
-# Create audit policy
-cat > /etc/rancher/k3s/audit.yaml << 'EOF'
-apiVersion: audit.k8s.io/v1
-kind: Policy
-rules:
-- level: Metadata
-  namespaces: ["kube-system", "kube-public", "kube-node-lease"]
-- level: Request
-  resources:
-  - group: ""
-    resources: ["pods", "services"]
-EOF
-```
-
-### Backup Strategy
-
-The script automatically configures etcd snapshots:
-
-```bash
-# Manual snapshot
-k3s etcd-snapshot save my-snapshot
-
-# List snapshots
-ls -la /var/lib/rancher/k3s/server/db/snapshots/
-
-# Restore from snapshot (emergency only)
-k3s server --cluster-reset --cluster-reset-restore-path=/path/to/snapshot
-```
-
-## 🔧 Troubleshooting
-
-### Common Issues and Solutions
-
-#### Issue: Nodes not joining cluster
-
-```bash
-# Check network connectivity
-nc -zv MASTER_IP 6443
-
-# Verify token
-sudo cat /var/lib/rancher/k3s/server/node-token
-
-# Check logs
-journalctl -u k3s -f
-```
-
-#### Issue: MetalLB not assigning IPs
-
-```bash
-# Check MetalLB configuration
-k3s kubectl get ipaddresspool -n metallb-system -o yaml
-
-# Verify IP range availability
-nmap -sn YOUR_IP_RANGE
-
-# Check MetalLB logs
-k3s kubectl logs -n metallb-system -l app=metallb
-```
-
-#### Issue: Proxy not working
-
-```bash
-# Verify proxy environment
-env | grep -i proxy
-
-# Test proxy connectivity
-curl -x $HTTP_PROXY http://get.k3s.io
-
-# Check systemd service environment
-systemctl show k3s | grep Environment
-```
-
-### Log Locations
-
-```bash
-# K3s service logs
-journalctl -u k3s -f
-
-# K3s server logs
-tail -f /var/lib/rancher/k3s/agent/logs/k3s.log
-
-# Container runtime logs
-crictl logs CONTAINER_ID
-```
-
-### Useful Commands
-
-```bash
-# Restart K3s service
-sudo systemctl restart k3s
-
-# Check K3s configuration
-sudo cat /etc/rancher/k3s/config.yaml
-
-# View cluster certificates
-sudo k3s certificate rotate --help
-
-# Check resource usage
-k3s kubectl top nodes
-k3s kubectl top pods -A
-```
-
-## 📈 Monitoring and Maintenance
-
-### Built-in Monitoring
-
-```bash
-# Install metrics server (if needed)
-k3s kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-
-# View resource usage
-k3s kubectl top nodes
-k3s kubectl top pods -A
-```
-
-### Recommended Monitoring Stack
-
-```bash
-# Install Prometheus + Grafana using Helm
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm install prometheus prometheus-community/kube-prometheus-stack
-```
-
-### Maintenance Tasks
-
-```bash
-# Update K3s (on each node)
-curl -sfL https://get.k3s.io | sh -
-
-# Clean up unused images
-k3s crictl rmi --prune
-
-# Rotate certificates (annually)
-k3s certificate rotate
-```
-
-## 🚀 Scaling Operations
-
-### Adding More Nodes
-
-```bash
-# Add worker node
-./k3s-ha-install.sh --worker --token TOKEN --master-ip MASTER_IP
-
-# Add master node (for scaling HA)
-./k3s-ha-install.sh --master-ha --token TOKEN --secret SECRET --master-ip MASTER_IP
-```
-
-### Removing Nodes
-
-```bash
-# Drain node
-k3s kubectl drain NODE_NAME --ignore-daemonsets --delete-emptydir-data
-
-# Remove from cluster
-k3s kubectl delete node NODE_NAME
-
-# Uninstall K3s from node
-/usr/local/bin/k3s-uninstall.sh
-```
 
