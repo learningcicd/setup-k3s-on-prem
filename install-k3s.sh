@@ -3,38 +3,31 @@
 # Configuration variables
 MASTER_IP=""
 TOKEN_FILE="/tmp/k3s-node-token"
-KUBECONFIG_FILE="/etc/rancher/k3s/k3s.yaml"
 
 # Proxy configuration (set these if behind corporate proxy)
 HTTP_PROXY=""
 HTTPS_PROXY=""
-NO_PROXY=""
+NO_PROXY="localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local,.cluster.local"
 
 # MetalLB IP range (adjust for your network)
-METALLB_IP_RANGE=""
-
-# High Availability configuration
-CLUSTER_SECRET=""
-EXTERNAL_DB=""  # Optional: external database for HA (e.g., "postgres://user:pass@host:5432/k3s")
+METALLB_IP_RANGE="192.168.1.240-192.168.1.250"
 
 # Function to display usage
 show_usage() {
     echo "========================================"
-    echo "   K3s HA Installation Script          "
+    echo "   K3s Simple Installation Script      "
     echo "   with MetalLB + Proxy Support        "
     echo "========================================"
     echo ""
     echo "Usage: $0 [OPTIONS] MODE"
     echo ""
     echo "Modes:"
-    echo "  --master          Install as first master node"
-    echo "  --master-ha       Install as additional master node (requires --token and --secret)"
+    echo "  --master          Install as master node"
     echo "  --worker          Install as worker node (requires --token)"
     echo ""
     echo "Options:"
     echo "  --master-ip IP           Master node IP address (default: $MASTER_IP)"
-    echo "  --token TOKEN            K3s join token (required for --master-ha and --worker)"
-    echo "  --secret SECRET          Cluster secret (required for --master-ha)"
+    echo "  --token TOKEN            K3s join token (required for --worker)"
     echo "  --metallb-range RANGE    MetalLB IP range (default: $METALLB_IP_RANGE)"
     echo "  --http-proxy URL         HTTP proxy URL"
     echo "  --https-proxy URL        HTTPS proxy URL"
@@ -42,14 +35,17 @@ show_usage() {
     echo "  --help                   Show this help message"
     echo ""
     echo "Examples:"
-    echo "  # Install first master node"
+    echo "  # Install master node"
     echo "  $0 --master"
     echo ""
-    echo "  # Install additional master with proxy"
-    echo "  $0 --master-ha --token TOKEN --secret SECRET --http-proxy http://proxy:8080"
+    echo "  # Install master with custom MetalLB range"
+    echo "  $0 --master --metallb-range '10.0.1.100-10.0.1.110'"
     echo ""
     echo "  # Install worker node"
     echo "  $0 --worker --token TOKEN --master-ip 192.168.1.10"
+    echo ""
+    echo "  # Install with proxy support"
+    echo "  $0 --master --http-proxy http://proxy:8080 --https-proxy http://proxy:8080"
     echo ""
 }
 
@@ -135,27 +131,6 @@ install_helm() {
     fi
 }
 
-# Function to configure high availability
-configure_ha() {
-    echo "[INFO] Configuring high availability settings..."
-    
-    # Create cluster secret if not provided
-    if [ -z "$CLUSTER_SECRET" ]; then
-        CLUSTER_SECRET=$(openssl rand -base64 32)
-        echo "[INFO] Generated cluster secret: $CLUSTER_SECRET"
-        echo "IMPORTANT: Save this secret for additional master nodes!"
-    fi
-    
-    # Configure etcd snapshot settings for backup
-    cat <<EOF | sudo tee /etc/rancher/k3s/config.yaml
-etcd-snapshot-schedule-cron: "0 */12 * * *"
-etcd-snapshot-retention: 10
-etcd-snapshot-dir: /var/lib/rancher/k3s/server/db/snapshots
-cluster-cidr: "10.42.0.0/16"
-service-cidr: "10.43.0.0/16"
-EOF
-}
-
 # Function to perform common system setup
 common_setup() {
     echo "[INFO] Performing common system setup..."
@@ -178,8 +153,6 @@ final_configuration() {
     if command -v ufw &> /dev/null; then
         sudo ufw allow 6443/tcp   # K3s API server
         sudo ufw allow 10250/tcp  # Kubelet
-        sudo ufw allow 2379/tcp   # ETCD client
-        sudo ufw allow 2380/tcp   # ETCD peer
         echo "[INFO] Firewall rules configured"
     fi
 
@@ -193,23 +166,19 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 EOF
 }
 
-# Function to install first master node
+# Function to install master node
 install_master() {
-    echo "[INFO] Installing K3s as FIRST MASTER (Traefik disabled)..."
+    echo "[INFO] Installing K3s as MASTER (Traefik disabled)..."
     
     common_setup
-    configure_ha
     
-    # Install K3s with HA configuration
+    # Install K3s with basic configuration
     curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
         --disable=traefik \
         --disable=servicelb \
-        --cluster-secret=$CLUSTER_SECRET \
-        --write-kubeconfig-mode=644 \
-        --etcd-snapshot-schedule-cron='0 */12 * * *' \
-        --etcd-snapshot-retention=10" sh -
+        --write-kubeconfig-mode=644" sh -
     
-    # Save tokens and configuration
+    # Save token for worker nodes
     echo "[INFO] Saving cluster configuration..."
     sudo cat /var/lib/rancher/k3s/server/node-token | sudo tee $TOKEN_FILE
     sudo chmod 644 $TOKEN_FILE
@@ -232,45 +201,18 @@ install_master() {
     
     # Display cluster information
     echo ""
-    echo "[SUCCESS] First master node installed successfully!"
+    echo "[SUCCESS] Master node installed successfully!"
     echo "========================================="
     echo "Cluster Information:"
     echo "- MetalLB LoadBalancer enabled"
     echo "- Helm package manager installed"
-    echo "- ETCD snapshots configured (every 12 hours)"
-    echo "- Cluster Secret: $CLUSTER_SECRET"
+    echo "- Single master node (non-HA)"
     echo ""
-    echo "For ADDITIONAL MASTER nodes, use:"
-    echo "$0 --master-ha --token \$(sudo cat $TOKEN_FILE) --secret $CLUSTER_SECRET --master-ip $MASTER_IP"
-    echo ""
-    echo "For WORKER nodes, use:"
+    echo "To add WORKER nodes, use:"
     echo "$0 --worker --token \$(sudo cat $TOKEN_FILE) --master-ip $MASTER_IP"
+    echo ""
+    echo "Join token: $(sudo cat $TOKEN_FILE 2>/dev/null || echo 'Check /tmp/k3s-node-token')"
     echo "========================================="
-}
-
-# Function to install additional master node
-install_master_ha() {
-    if [ -z "$NODE_TOKEN" ] || [ -z "$CLUSTER_SECRET" ]; then
-        echo "[ERROR] --token and --secret are required for --master-ha mode"
-        echo "Use --help for usage information"
-        exit 1
-    fi
-    
-    echo "[INFO] Installing K3s as ADDITIONAL MASTER..."
-    
-    common_setup
-    
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
-        --disable=traefik \
-        --disable=servicelb \
-        --server=https://$MASTER_IP:6443 \
-        --token=$NODE_TOKEN \
-        --cluster-secret=$CLUSTER_SECRET \
-        --write-kubeconfig-mode=644" sh -
-    
-    final_configuration
-    
-    echo "[SUCCESS] Additional master node joined cluster."
 }
 
 # Function to install worker node
@@ -304,10 +246,6 @@ while [[ $# -gt 0 ]]; do
             MODE="master"
             shift
             ;;
-        --master-ha)
-            MODE="master-ha"
-            shift
-            ;;
         --worker)
             MODE="worker"
             shift
@@ -318,10 +256,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --token)
             NODE_TOKEN="$2"
-            shift 2
-            ;;
-        --secret)
-            CLUSTER_SECRET="$2"
             shift 2
             ;;
         --metallb-range)
@@ -363,9 +297,6 @@ fi
 case $MODE in
     master)
         install_master
-        ;;
-    master-ha)
-        install_master_ha
         ;;
     worker)
         install_worker
