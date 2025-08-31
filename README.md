@@ -1,8 +1,8 @@
 # Setting Up K3s
 
 ## Installing Master 
-Pre-Requisites
-Hardware Requirements
+### Pre-Requisites
+*** Hardware Requirements ***
 
 - CPU: Minimum 2 cores (4+ cores recommended for production)
 - RAM: Minimum 2GB (4GB+ recommended for production)
