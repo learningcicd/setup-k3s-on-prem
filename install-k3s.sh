@@ -1,16 +1,57 @@
 #!/bin/bash
 
 # Configuration variables
-MASTER_IP="173.224.122.95"
-METALLB_IP_RANGE="192.168.1.240-192.168.1.250"
-INSTALL_METALLB=true
+MASTER_IP=""
+METALLB_IP_RANGE=""
+INSTALL_METALLB=false
 
 # Proxy configuration (set these if behind corporate proxy)
 HTTP_PROXY=""
 HTTPS_PROXY=""
-NO_PROXY="localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local,.cluster.local"
+NO_PROXY=""
 
-# Function to display usage
+# Function to detect OS and set appropriate commands
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        OS_VERSION=$VERSION_ID
+    else
+        echo "[ERROR] Cannot detect OS version"
+        exit 1
+    fi
+    
+    case $OS in
+        ubuntu|debian)
+            PKG_MANAGER="apt"
+            PKG_UPDATE="apt update && apt upgrade -y"
+            PKG_INSTALL="apt install -y"
+            FIREWALL_CMD="ufw"
+            ;;
+        rhel|centos|rocky|almalinux|fedora)
+            if command -v dnf &> /dev/null; then
+                PKG_MANAGER="dnf"
+                PKG_UPDATE="dnf update -y"
+                PKG_INSTALL="dnf install -y"
+            else
+                PKG_MANAGER="yum"
+                PKG_UPDATE="yum update -y"
+                PKG_INSTALL="yum install -y"
+            fi
+            FIREWALL_CMD="firewalld"
+            ;;
+        *)
+            echo "[WARNING] Unsupported OS: $OS. Attempting with dnf/yum..."
+            PKG_MANAGER="dnf"
+            PKG_UPDATE="dnf update -y"
+            PKG_INSTALL="dnf install -y"
+            FIREWALL_CMD="firewalld"
+            ;;
+    esac
+    
+    echo "[INFO] Detected OS: $OS $OS_VERSION"
+    echo "[INFO] Using package manager: $PKG_MANAGER"
+}
 show_usage() {
     echo "========================================"
     echo "   K3s Simple Installation Script      "
@@ -22,6 +63,7 @@ show_usage() {
     echo "Modes:"
     echo "  --master          Install as master node"
     echo "  --worker          Install as worker node (requires --token)"
+    echo "  --cleanup         Uninstall K3s and cleanup system"
     echo ""
     echo "Options:"
     echo "  --master-ip IP           Master node IP address (default: $MASTER_IP)"
@@ -49,6 +91,9 @@ show_usage() {
     echo "  # Install with proxy support and no MetalLB"
     echo "  $0 --master --skip-metallb --http-proxy http://proxy:8080 --https-proxy http://proxy:8080"
     echo ""
+    echo "  # Cleanup/uninstall K3s"
+    echo "  $0 --cleanup"
+    echo ""
 }
 
 # Function to setup proxy environment
@@ -64,10 +109,15 @@ setup_proxy() {
         export no_proxy="$NO_PROXY"
         export NO_PROXY="$NO_PROXY"
         
-        # Configure apt proxy
+        # Configure apt/yum proxy
         if [ -n "$HTTP_PROXY" ]; then
-            echo "Acquire::http::Proxy \"$HTTP_PROXY\";" | sudo tee /etc/apt/apt.conf.d/01proxy
-            echo "Acquire::https::Proxy \"$HTTPS_PROXY\";" | sudo tee -a /etc/apt/apt.conf.d/01proxy
+            if [ "$PKG_MANAGER" = "apt" ]; then
+                echo "Acquire::http::Proxy \"$HTTP_PROXY\";" | sudo tee /etc/apt/apt.conf.d/01proxy
+                echo "Acquire::https::Proxy \"$HTTPS_PROXY\";" | sudo tee -a /etc/apt/apt.conf.d/01proxy
+            else
+                # For RHEL/CentOS/Fedora
+                echo "proxy=$HTTP_PROXY" | sudo tee -a /etc/yum.conf
+            fi
         fi
         
         # Configure Docker/containerd proxy (for K3s)
@@ -119,7 +169,210 @@ EOF
     echo "[SUCCESS] MetalLB installed with IP range: $METALLB_IP_RANGE"
 }
 
-# Function to install Helm (useful for future deployments)
+# Function to cleanup/uninstall K3s
+cleanup_k3s() {
+    echo "[INFO] Starting K3s cleanup and uninstallation..."
+    echo ""
+    
+    # Ask for confirmation
+    read -p "This will completely remove K3s and all associated data. Continue? [y/N]: " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "[INFO] Cleanup cancelled."
+        exit 0
+    fi
+    
+    echo "[INFO] Proceeding with cleanup..."
+    echo ""
+    
+    # Step 1: Stop K3s service
+    echo "[INFO] Stopping K3s service..."
+    if systemctl is-active --quiet k3s; then
+        sudo systemctl stop k3s
+        echo "✅ K3s service stopped"
+    else
+        echo "ℹ️  K3s service not running"
+    fi
+    
+    # Step 2: Run K3s uninstall script (if it exists)
+    if [ -f /usr/local/bin/k3s-uninstall.sh ]; then
+        echo "[INFO] Running K3s uninstall script..."
+        sudo /usr/local/bin/k3s-uninstall.sh
+        echo "✅ K3s uninstall script completed"
+    elif [ -f /usr/local/bin/k3s-agent-uninstall.sh ]; then
+        echo "[INFO] Running K3s agent uninstall script..."
+        sudo /usr/local/bin/k3s-agent-uninstall.sh
+        echo "✅ K3s agent uninstall script completed"
+    else
+        echo "ℹ️  No K3s uninstall script found, proceeding with manual cleanup"
+    fi
+    
+    # Step 3: Remove K3s binaries
+    echo "[INFO] Removing K3s binaries..."
+    sudo rm -f /usr/local/bin/k3s
+    sudo rm -f /usr/local/bin/crictl
+    sudo rm -f /usr/local/bin/ctr
+    echo "✅ K3s binaries removed"
+    
+    # Step 4: Remove K3s data directories
+    echo "[INFO] Removing K3s data directories..."
+    sudo rm -rf /etc/rancher/k3s
+    sudo rm -rf /var/lib/rancher/k3s
+    sudo rm -rf /var/lib/kubelet
+    sudo rm -rf /var/lib/cni
+    sudo rm -rf /var/log/pods
+    sudo rm -rf /var/log/containers
+    echo "✅ K3s data directories removed"
+    
+    # Step 5: Remove systemd service files
+    echo "[INFO] Removing systemd service files..."
+    sudo rm -f /etc/systemd/system/k3s.service
+    sudo rm -f /etc/systemd/system/k3s-agent.service
+    sudo rm -rf /etc/systemd/system/k3s.service.d
+    sudo rm -rf /etc/systemd/system/k3s-agent.service.d
+    sudo systemctl daemon-reload
+    echo "✅ Systemd service files removed"
+    
+    # Step 6: Remove network interfaces
+    echo "[INFO] Cleaning up network interfaces..."
+    # Remove CNI interfaces
+    for iface in $(ip link show | grep -E "(cni|flannel|veth)" | awk -F: '{print $2}' | tr -d ' '); do
+        if [ -n "$iface" ]; then
+            sudo ip link delete "$iface" 2>/dev/null || true
+        fi
+    done
+    
+    # Remove bridge interfaces
+    for bridge in $(ip link show type bridge | grep -E "(cni|k3s)" | awk -F: '{print $2}' | tr -d ' '); do
+        if [ -n "$bridge" ]; then
+            sudo ip link delete "$bridge" 2>/dev/null || true
+        fi
+    done
+    echo "✅ Network interfaces cleaned"
+    
+    # Step 7: Remove CNI configuration
+    echo "[INFO] Removing CNI configuration..."
+    sudo rm -rf /etc/cni/net.d
+    sudo rm -rf /opt/cni/bin
+    echo "✅ CNI configuration removed"
+    
+    # Step 8: Clean up iptables rules
+    echo "[INFO] Cleaning up iptables rules..."
+    # Remove K3s-related chains and rules
+    sudo iptables -t nat -F K3S-NODEPORTS 2>/dev/null || true
+    sudo iptables -t nat -F K3S-POSTROUTING 2>/dev/null || true
+    sudo iptables -t filter -F K3S-FIREWALL 2>/dev/null || true
+    sudo iptables -t nat -X K3S-NODEPORTS 2>/dev/null || true
+    sudo iptables -t nat -X K3S-POSTROUTING 2>/dev/null || true
+    sudo iptables -t filter -X K3S-FIREWALL 2>/dev/null || true
+    
+    # Flush and remove KUBE-* chains
+    for table in filter nat mangle; do
+        for chain in $(sudo iptables -t $table -L | grep "^Chain KUBE-" | awk '{print $2}'); do
+            sudo iptables -t $table -F "$chain" 2>/dev/null || true
+            sudo iptables -t $table -X "$chain" 2>/dev/null || true
+        done
+    done
+    echo "✅ iptables rules cleaned"
+    
+    # Step 9: Remove configuration files and aliases
+    echo "[INFO] Removing configuration files..."
+    sudo rm -f /etc/profile.d/k3s-aliases.sh
+    
+    # Remove proxy configurations based on what was likely set
+    sudo rm -f /etc/apt/apt.conf.d/01proxy
+    
+    # Remove yum/dnf proxy configuration (be careful not to break existing config)
+    if [ -f /etc/yum.conf ]; then
+        sudo sed -i '/^proxy=/d' /etc/yum.conf 2>/dev/null || true
+    fi
+    
+    echo "✅ Configuration files removed"
+    
+    # Step 10: Remove any leftover mount points
+    echo "[INFO] Cleaning up mount points..."
+    # Unmount any remaining kubelet mounts
+    for mount in $(mount | grep kubelet | awk '{print $3}'); do
+        sudo umount "$mount" 2>/dev/null || true
+    done
+    
+    # Unmount any remaining container mounts
+    for mount in $(mount | grep -E "(containers|pods)" | awk '{print $3}'); do
+        sudo umount "$mount" 2>/dev/null || true
+    done
+    echo "✅ Mount points cleaned"
+    
+    # Step 11: Remove containers and images (if containerd is still running)
+    echo "[INFO] Cleaning up containers and images..."
+    if command -v crictl &> /dev/null; then
+        sudo crictl rmi --all 2>/dev/null || true
+        sudo crictl rm --all 2>/dev/null || true
+    fi
+    echo "✅ Container cleanup attempted"
+    
+    # Step 12: Clean up any remaining processes
+    echo "[INFO] Stopping any remaining K3s processes..."
+    sudo pkill -f k3s 2>/dev/null || true
+    sudo pkill -f containerd 2>/dev/null || true
+    sudo pkill -f kubelet 2>/dev/null || true
+    echo "✅ Processes cleaned"
+    
+    # Step 14: Clean up firewall rules
+    echo "[INFO] Cleaning up firewall rules..."
+    
+    # Clean UFW rules (Ubuntu/Debian)
+    if command -v ufw &> /dev/null; then
+        sudo ufw delete allow 6443/tcp 2>/dev/null || true
+        sudo ufw delete allow 10250/tcp 2>/dev/null || true
+        sudo ufw delete allow 7946/tcp 2>/dev/null || true
+        sudo ufw delete allow 7946/udp 2>/dev/null || true
+        echo "✅ UFW rules cleaned"
+    fi
+    
+    # Clean firewalld rules (RHEL/CentOS)
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        sudo firewall-cmd --permanent --remove-port=6443/tcp 2>/dev/null || true
+        sudo firewall-cmd --permanent --remove-port=10250/tcp 2>/dev/null || true
+        sudo firewall-cmd --permanent --remove-port=8472/udp 2>/dev/null || true
+        sudo firewall-cmd --permanent --remove-port=7946/tcp 2>/dev/null || true
+        sudo firewall-cmd --permanent --remove-port=7946/udp 2>/dev/null || true
+        sudo firewall-cmd --reload 2>/dev/null || true
+        echo "✅ Firewalld rules cleaned"
+    fi
+    read -p "Remove Helm as well? [y/N]: " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "[INFO] Removing Helm..."
+        sudo rm -f /usr/local/bin/helm
+        sudo rm -rf ~/.helm
+        sudo rm -rf ~/.cache/helm
+        sudo rm -rf ~/.config/helm
+        echo "✅ Helm removed"
+    else
+        echo "ℹ️  Keeping Helm installation"
+    fi
+    
+    echo ""
+    echo "========================================="
+    echo "[SUCCESS] K3s cleanup completed!"
+    echo "========================================="
+    echo ""
+    echo "What was removed:"
+    echo "✅ K3s binaries and services"
+    echo "✅ All K3s data and configuration"
+    echo "✅ Network interfaces and CNI config"
+    echo "✅ iptables rules and chains"
+    echo "✅ Mount points and processes"
+    echo "✅ Container images and data"
+    echo ""
+    echo "Notes:"
+    echo "• A reboot is recommended to ensure all changes take effect"
+    echo "• Some network settings may require manual cleanup"
+    echo "• Check 'ip link show' for any remaining interfaces"
+    echo ""
+    echo "To reinstall K3s, run this script with --master or --worker"
+    echo "========================================="
+}
 install_helm() {
     if ! command -v helm &> /dev/null; then
         echo "[INFO] Installing Helm..."
@@ -136,26 +389,72 @@ install_helm() {
 # Function to perform common system setup
 common_setup() {
     echo "[INFO] Performing common system setup..."
+    
+    # Detect OS first
+    detect_os
+    
+    # Disable swap
     sudo swapoff -a
-    sudo sed -i '/swap/d' /etc/fstab
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        sudo sed -i '/swap/d' /etc/fstab
+    else
+        # RHEL/CentOS may use different swap configuration
+        sudo sed -i '/swap/d' /etc/fstab 2>/dev/null || true
+        # Also check for swap in systemd
+        sudo systemctl mask swap.target 2>/dev/null || true
+    fi
 
     # Setup proxy if needed
     setup_proxy
 
     # Update system
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install -y curl apt-transport-https openssl
+    echo "[INFO] Updating system packages..."
+    sudo $PKG_UPDATE
+    
+    # Install required packages
+    echo "[INFO] Installing required packages..."
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        sudo $PKG_INSTALL curl apt-transport-https openssl
+    else
+        sudo $PKG_INSTALL curl openssl wget
+        # Install additional packages that might be needed on RHEL
+        sudo $PKG_INSTALL iptables container-selinux
+    fi
 }
 
 # Function to configure firewall and final settings
 final_configuration() {
     echo "[INFO] Applying final configurations..."
 
-    # Configure firewall rules (if ufw is installed)
-    if command -v ufw &> /dev/null; then
+    # Configure firewall rules based on the system
+    if [ "$FIREWALL_CMD" = "ufw" ] && command -v ufw &> /dev/null; then
+        echo "[INFO] Configuring UFW firewall..."
         sudo ufw allow 6443/tcp   # K3s API server
         sudo ufw allow 10250/tcp  # Kubelet
-        echo "[INFO] Firewall rules configured"
+        if [ "$MODE" = "master" ] && [ "$INSTALL_METALLB" = true ]; then
+            sudo ufw allow 7946/tcp   # MetalLB memberlist
+            sudo ufw allow 7946/udp   # MetalLB memberlist
+        fi
+        echo "[INFO] UFW firewall rules configured"
+        
+    elif [ "$FIREWALL_CMD" = "firewalld" ] && systemctl is-active --quiet firewalld; then
+        echo "[INFO] Configuring firewalld..."
+        sudo firewall-cmd --permanent --add-port=6443/tcp    # K3s API server
+        sudo firewall-cmd --permanent --add-port=10250/tcp   # Kubelet
+        sudo firewall-cmd --permanent --add-port=8472/udp    # Flannel VXLAN
+        if [ "$MODE" = "master" ] && [ "$INSTALL_METALLB" = true ]; then
+            sudo firewall-cmd --permanent --add-port=7946/tcp   # MetalLB memberlist
+            sudo firewall-cmd --permanent --add-port=7946/udp   # MetalLB memberlist
+        fi
+        sudo firewall-cmd --reload
+        echo "[INFO] Firewalld rules configured"
+        
+    elif systemctl is-active --quiet firewalld; then
+        echo "[WARNING] Firewalld is active but firewall-cmd not found"
+        echo "[INFO] You may need to manually configure firewall rules"
+        
+    else
+        echo "[INFO] No active firewall detected or firewall configuration skipped"
     fi
 
     # Create useful aliases
@@ -266,6 +565,10 @@ while [[ $# -gt 0 ]]; do
             MODE="worker"
             shift
             ;;
+        --cleanup)
+            MODE="cleanup"
+            shift
+            ;;
         --master-ip)
             MASTER_IP="$2"
             shift 2
@@ -320,6 +623,9 @@ case $MODE in
         ;;
     worker)
         install_worker
+        ;;
+    cleanup)
+        cleanup_k3s
         ;;
     *)
         echo "[ERROR] Invalid mode: $MODE"
