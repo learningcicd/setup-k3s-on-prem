@@ -2,16 +2,13 @@
 
 # Configuration variables
 MASTER_IP="173.224.122.95"
-TOKEN_FILE="/tmp/k3s-node-token"
+METALLB_IP_RANGE="192.168.1.240-192.168.1.250"
+INSTALL_METALLB=true
 
 # Proxy configuration (set these if behind corporate proxy)
 HTTP_PROXY=""
 HTTPS_PROXY=""
 NO_PROXY="localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local,.cluster.local"
-
-# MetalLB IP range (adjust for your network)
-METALLB_IP_RANGE="192.168.1.240-192.168.1.250"
-INSTALL_METALLB=true
 
 # Function to display usage
 show_usage() {
@@ -191,8 +188,8 @@ install_master() {
     
     # Save token for worker nodes
     echo "[INFO] Saving cluster configuration..."
-    sudo cat /var/lib/rancher/k3s/server/node-token | sudo tee $TOKEN_FILE
-    sudo chmod 644 $TOKEN_FILE
+    local token_file="/var/lib/rancher/k3s/server/node-token"
+    echo "[INFO] Worker join token saved at: $token_file"
     
     # Wait for K3s to be ready
     echo "[INFO] Waiting for K3s to be ready..."
@@ -228,15 +225,15 @@ install_master() {
     echo "- Single master node (non-HA)"
     echo ""
     echo "To add WORKER nodes, use:"
-    echo "$0 --worker --token \$(sudo cat $TOKEN_FILE) --master-ip $MASTER_IP"
+    echo "$0 --worker --token \$(sudo cat /var/lib/rancher/k3s/server/node-token) --master-ip $MASTER_IP"
     echo ""
-    echo "Join token: $(sudo cat $TOKEN_FILE 2>/dev/null || echo 'Check /tmp/k3s-node-token')"
+    echo "Join token: $(sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo 'Run: sudo cat /var/lib/rancher/k3s/server/node-token')"
     echo "========================================="
 }
 
 # Function to install worker node
 install_worker() {
-    if [ -z "$NODE_TOKEN" ]; then
+    if [ -z "$JOIN_TOKEN" ]; then
         echo "[ERROR] --token is required for --worker mode"
         echo "Use --help for usage information"
         exit 1
@@ -248,7 +245,7 @@ install_worker() {
     
     curl -sfL https://get.k3s.io | \
     K3S_URL="https://$MASTER_IP:6443" \
-    K3S_TOKEN="$NODE_TOKEN" sh -
+    K3S_TOKEN="$JOIN_TOKEN" sh -
     
     final_configuration
     
@@ -257,7 +254,7 @@ install_worker() {
 
 # Parse command line arguments
 MODE=""
-NODE_TOKEN=""
+JOIN_TOKEN=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -274,7 +271,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --token)
-            NODE_TOKEN="$2"
+            JOIN_TOKEN="$2"
             shift 2
             ;;
         --skip-metallb)
