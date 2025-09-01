@@ -47,13 +47,6 @@ This installation script creates a production-ready K3s cluster with:
 #### Firewall Configuration
 
 ```bash
-# Ubuntu/Debian with UFW (handled automatically by script)
-sudo ufw allow 6443/tcp
-sudo ufw allow 2379/tcp
-sudo ufw allow 2380/tcp
-sudo ufw allow 10250/tcp
-sudo ufw allow 8472/udp
-
 # CentOS/RHEL with firewalld
 sudo firewall-cmd --permanent --add-port=6443/tcp
 sudo firewall-cmd --permanent --add-port=2379/tcp
