@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration variables
-MASTER_IP=""
+MASTER_IP="173.224.122.95"
 TOKEN_FILE="/tmp/k3s-node-token"
 
 # Proxy configuration (set these if behind corporate proxy)
@@ -11,6 +11,7 @@ NO_PROXY="localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local,.cl
 
 # MetalLB IP range (adjust for your network)
 METALLB_IP_RANGE="192.168.1.240-192.168.1.250"
+INSTALL_METALLB=true
 
 # Function to display usage
 show_usage() {
@@ -29,6 +30,7 @@ show_usage() {
     echo "  --master-ip IP           Master node IP address (default: $MASTER_IP)"
     echo "  --token TOKEN            K3s join token (required for --worker)"
     echo "  --metallb-range RANGE    MetalLB IP range (default: $METALLB_IP_RANGE)"
+    echo "  --skip-metallb           Skip MetalLB installation"
     echo "  --http-proxy URL         HTTP proxy URL"
     echo "  --https-proxy URL        HTTPS proxy URL"
     echo "  --no-proxy LIST          No proxy list (default: internal ranges)"
@@ -38,14 +40,17 @@ show_usage() {
     echo "  # Install master node"
     echo "  $0 --master"
     echo ""
+    echo "  # Install master without MetalLB"
+    echo "  $0 --master --skip-metallb"
+    echo ""
     echo "  # Install master with custom MetalLB range"
     echo "  $0 --master --metallb-range '10.0.1.100-10.0.1.110'"
     echo ""
     echo "  # Install worker node"
     echo "  $0 --worker --token TOKEN --master-ip 192.168.1.10"
     echo ""
-    echo "  # Install with proxy support"
-    echo "  $0 --master --http-proxy http://proxy:8080 --https-proxy http://proxy:8080"
+    echo "  # Install with proxy support and no MetalLB"
+    echo "  $0 --master --skip-metallb --http-proxy http://proxy:8080 --https-proxy http://proxy:8080"
     echo ""
 }
 
@@ -173,10 +178,16 @@ install_master() {
     common_setup
     
     # Install K3s with basic configuration
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
-        --disable=traefik \
-        --disable=servicelb \
-        --write-kubeconfig-mode=644" sh -
+    if [ "$INSTALL_METALLB" = true ]; then
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
+            --disable=traefik \
+            --disable=servicelb \
+            --write-kubeconfig-mode=644" sh -
+    else
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
+            --disable=traefik \
+            --write-kubeconfig-mode=644" sh -
+    fi
     
     # Save token for worker nodes
     echo "[INFO] Saving cluster configuration..."
@@ -190,8 +201,12 @@ install_master() {
         sleep 5
     done
     
-    # Install MetalLB
-    install_metallb
+    # Install MetalLB if requested
+    if [ "$INSTALL_METALLB" = true ]; then
+        install_metallb
+    else
+        echo "[INFO] Skipping MetalLB installation (using K3s ServiceLB)"
+    fi
     
     # Install Helm for future use
     install_helm
@@ -204,7 +219,11 @@ install_master() {
     echo "[SUCCESS] Master node installed successfully!"
     echo "========================================="
     echo "Cluster Information:"
-    echo "- MetalLB LoadBalancer enabled"
+    if [ "$INSTALL_METALLB" = true ]; then
+        echo "- MetalLB LoadBalancer enabled"
+    else
+        echo "- K3s ServiceLB enabled (NodePort/LoadBalancer)"
+    fi
     echo "- Helm package manager installed"
     echo "- Single master node (non-HA)"
     echo ""
@@ -257,6 +276,10 @@ while [[ $# -gt 0 ]]; do
         --token)
             NODE_TOKEN="$2"
             shift 2
+            ;;
+        --skip-metallb)
+            INSTALL_METALLB=false
+            shift
             ;;
         --metallb-range)
             METALLB_IP_RANGE="$2"
@@ -313,6 +336,10 @@ echo "[SUCCESS] Installation completed!"
 echo "Useful commands:"
 echo "- Check cluster status: k3s kubectl get nodes"
 echo "- View all pods: k3s kubectl get pods -A"
-echo "- Check MetalLB: k3s kubectl get pods -n metallb-system"
+if [ "$INSTALL_METALLB" = true ]; then
+    echo "- Check MetalLB: k3s kubectl get pods -n metallb-system"
+else
+    echo "- Check ServiceLB: k3s kubectl get svc (NodePort services)"
+fi
 echo ""
 echo "Reload your shell or run: source /etc/profile.d/k3s-aliases.sh"
